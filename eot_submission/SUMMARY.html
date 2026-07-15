@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>End-of-Turn Detection - Solution Summary</title>
+<style>
+:root{--ink:#17202a;--muted:#59636e;--line:#d9e1e8;--panel:#f5f8fb;--accent:#176b87;--good:#247a52;--warn:#9a5a13}
+*{box-sizing:border-box}body{margin:0;background:#eef3f6;color:var(--ink);font:16px/1.58 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+main{max-width:1040px;margin:28px auto;background:white;padding:48px 56px;box-shadow:0 8px 30px rgba(25,45,60,.11)}
+h1{font-size:2.35rem;line-height:1.1;margin:0 0 8px}h2{margin-top:38px;border-bottom:2px solid var(--line);padding-bottom:7px}h3{margin-top:24px}
+.lead{font-size:1.12rem;color:var(--muted);max-width:850px}.badge{display:inline-block;padding:4px 10px;border-radius:999px;background:#e6f2f6;color:var(--accent);font-weight:700;font-size:.82rem;margin-right:6px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.card{border:1px solid var(--line);border-radius:10px;padding:18px;background:var(--panel)}
+.metric{font-size:2rem;font-weight:800}.good{color:var(--good)}.muted{color:var(--muted)}.warning{border-left:5px solid var(--warn);padding:12px 16px;background:#fff8ee}
+code{background:#edf2f5;padding:2px 5px;border-radius:4px}pre{background:#18212a;color:#edf4f7;padding:16px;border-radius:8px;overflow:auto;line-height:1.4}
+table{width:100%;border-collapse:collapse;margin:12px 0}th,td{padding:10px 12px;border:1px solid var(--line);text-align:left}th{background:#edf3f6}.small{font-size:.9rem;color:var(--muted)}
+.barrow{display:grid;grid-template-columns:120px 1fr 90px;gap:12px;align-items:center;margin:13px 0}.track{height:24px;background:#e6edf1;border-radius:4px;overflow:hidden}.bar{height:100%;background:var(--accent)}.bar.goodbar{background:var(--good)}
+ul{padding-left:22px}.footer{margin-top:42px;padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-size:.9rem}
+@media(max-width:760px){main{margin:0;padding:28px 22px}.grid{grid-template-columns:1fr}.barrow{grid-template-columns:95px 1fr 75px}}
+</style>
+</head>
+<body><main>
+<span class="badge">CPU only</span><span class="badge">No pretrained models</span><span class="badge">Strictly causal</span>
+<h1>End-of-Turn Detection</h1>
+<p class="lead">A submission-ready pause classifier that estimates <code>p_eot</code> from acoustic and turn-position evidence available at the instant speech stops. The implementation includes a portable NumPy-data model, unseen-folder prediction interface, required prediction files, grouped validation, run log, notes, and reproducibility instructions.</p>
+
+<h2>Executive result</h2>
+<div class="grid">
+  <div class="card"><div class="muted">English grouped out-of-fold</div><div class="metric good">1250 ms</div><div>versus 1600 ms silence baseline, a 21.9% reduction.</div></div>
+  <div class="card"><div class="muted">Hindi grouped out-of-fold</div><div class="metric good">802 ms</div><div>versus 850 ms silence baseline, a 5.6% reduction.</div></div>
+  <div class="card"><div class="muted">Required supplied-folder English prediction</div><div class="metric">100 ms</div><div>3.0% interrupted turns at the selected operating point.</div></div>
+  <div class="card"><div class="muted">Required supplied-folder Hindi prediction</div><div class="metric">100 ms</div><div>1.0% interrupted turns at the selected operating point.</div></div>
+</div>
+<p class="warning"><strong>Interpretation:</strong> the 100 ms values are the official scorer results after fitting on all supplied turns, so they are valid deliverable scores but not estimates of hidden-set generalization. The grouped out-of-fold values keep complete turns outside training and are the honest model-selection numbers.</p>
+
+<h2>Problem interpretation and causality</h2>
+<p>At every annotated pause the system must decide whether the user is finished. A false positive during a hold pause can interrupt the user; a false negative at the true end forces the agent toward the 1.6-second timeout. The scorer sweeps a probability threshold and an action delay, then selects the lowest mean end-of-turn response delay that interrupts no more than 5% of turns.</p>
+<p>The implementation makes causality explicit at the start of every feature call:</p>
+<pre><code>end = int(round(pause_start * sr))
+prefix = x[:end].copy()
+analysis = _analyse_prefix(prefix, sr)</code></pre>
+<p>Every subsequent frame, spectrum, energy statistic and pitch estimate is computed from <code>prefix</code>. The inference path does not read <code>pause_end</code>, <code>label</code>, the current pause duration, the file duration, or whether the current row is the final annotation. The full WAV may be cached for I/O efficiency, but no sample at or after <code>pause_start</code> reaches the feature extractor.</p>
+
+<h2>Signal used by the model</h2>
+<table>
+<thead><tr><th>Feature family</th><th>Examples</th><th>Why it can help</th></tr></thead>
+<tbody>
+<tr><td>Energy contour</td><td>Recent means, slopes, contrasts, dynamic range and active-frame fraction over 0.1-4.0 s windows</td><td>Completed phrases often have a different final decay and final-syllable envelope from short within-turn hesitations.</td></tr>
+<tr><td>Pitch and voicing</td><td>Autocorrelation F0, final voiced-run length, pitch slope, final pitch level and voiced fraction</td><td>Phrase-final intonation and voicing continuity provide language-independent prosodic evidence.</td></tr>
+<tr><td>Spectral shape</td><td>Centroid, bandwidth, rolloff, flatness, zero-crossing rate and eight coarse log-frequency bands</td><td>Captures broad phonetic shape near the boundary without an ASR model or downloaded weights.</td></tr>
+<tr><td>Rhythm</td><td>Active-run durations, gaps and energy-peak rate</td><td>Approximates speaking rate, phrase segmentation and final lengthening.</td></tr>
+<tr><td>Causal position</td><td><code>pause_index</code>, elapsed time, average span per observed pause and pause rate</td><td>Acts as a hazard prior: later pauses are more likely to end the turn, without looking ahead.</td></tr>
+</tbody>
+</table>
+<p>The feature vector has 153 numeric values. All operations are NumPy/SciPy calculations and run on a laptop CPU.</p>
+
+<h2>Model and training strategy</h2>
+<p>The saved model averages three small classifiers: a sparse L1 logistic regression, Extra Trees and histogram gradient boosting. Linear and nonlinear components are combined because the data set is small: the linear model stabilizes broad trends, while the tree models capture interactions such as a falling energy contour being useful only when the final voiced segment is sufficiently long.</p>
+<p>Long hold pauses receive larger training weights. This is not an inference feature: the duration is used only while fitting on labelled training data, because long holds are the examples that can cause false cutoffs at practical action delays. The final artifact contains separate English and Hindi ensembles plus a pooled fallback for an unseen folder whose language cannot be recognized from the folder or turn IDs.</p>
+<p>Validation uses five folds grouped by <code>turn_id</code>. No pause from a held-out turn appears in that fold's training set. Model choice was based on the official delay metric rather than accuracy alone.</p>
+
+<h2>Results graphs</h2>
+<h3>Grouped out-of-fold delay at no more than 5% interruptions</h3>
+<div class="card">
+<div class="barrow"><strong>English base</strong><div class="track"><div class="bar" style="width:100%"></div></div><span>1600 ms</span></div>
+<div class="barrow"><strong>English model</strong><div class="track"><div class="bar goodbar" style="width:78.1%"></div></div><span>1250 ms</span></div>
+<div class="barrow"><strong>Hindi base</strong><div class="track"><div class="bar" style="width:53.1%"></div></div><span>850 ms</span></div>
+<div class="barrow"><strong>Hindi model</strong><div class="track"><div class="bar goodbar" style="width:50.1%"></div></div><span>802 ms</span></div>
+</div>
+<p class="small">Bars share a 1600 ms scale. Lower is better. Grouped OOF AUC was 0.626 for English and 0.742 for Hindi.</p>
+
+<h3>Required predictions after fitting all supplied turns</h3>
+<div class="card">
+<div class="barrow"><strong>English</strong><div class="track"><div class="bar goodbar" style="width:6.25%"></div></div><span>100 ms</span></div>
+<div class="barrow"><strong>Hindi</strong><div class="track"><div class="bar goodbar" style="width:6.25%"></div></div><span>100 ms</span></div>
+</div>
+<p class="small">This second graph documents the exact supplied-folder files included in the submission. It should not be used as a hidden-test forecast.</p>
+
+<h2>Error analysis</h2>
+<p>The grouped predictions show two recurring failure types. First, a continuation can sound complete: a long pause after falling pitch and energy receives a high EOT score. Second, true endings with weak, clipped or highly variable final speech receive low scores because their final contours resemble hesitation. The most useful quick manual checks are listed in <code>ERRORS_TO_REVIEW.md</code>; examples include the 3.0-second English hold in <code>en__091</code> and the Hindi EOT in <code>hi__040</code>.</p>
+<p>The Hindi baseline is already strong on the supplied folder because relatively few hold pauses survive beyond roughly 0.85 seconds. The model's gain therefore comes from identifying enough true endings at a shorter action delay while suppressing the small set of long holds.</p>
+
+<h2>Why this beats the status quo</h2>
+<ul>
+<li>A silence-only endpoint treats every pause alike and must wait long enough to survive the longest hesitations. This model adds phrase-final acoustic evidence and a causal turn hazard.</li>
+<li>The grouped English result reduces mean delay by 350 ms at the same interruption budget, while the grouped Hindi result improves an already favorable silence operating point.</li>
+<li>The inference code is deployable: one command, deterministic CPU execution, a portable saved model, no test-label fitting, no internet access and no pretrained representation. It does not unpickle scikit-learn estimator objects.</li>
+<li>Training is metric-aware: dangerous long holds matter more than short holds that end before the agent's action timer can fire.</li>
+</ul>
+
+<h2>Human and coding-agent work</h2>
+<table>
+<thead><tr><th>Contributor</th><th>Work completed</th></tr></thead>
+<tbody>
+<tr><td>Human</td><td>Supplied the assignment brief and handout, defined the one-hour/submission-ready constraints, ran both final prediction commands on a Mac, reproduced the official English and Hindi scores, and owns the final review and submission decision.</td></tr>
+<tr><td>Coding agent</td><td>Inspected the PDF and starter files, unpacked and profiled both language folders, ran the official baseline and scorer, implemented causal features and training, performed grouped validation, generated both required prediction files, tested the command-line interface, and created the documentation.</td></tr>
+</tbody>
+</table>
+<p>No manual listening is falsely claimed in this automated run. A genuine five-minute human review is explicitly separated so any observation added to the run log is defensible during the discussion.</p>
+
+<h2>Reproduction and deliverables</h2>
+<pre><code>python predict.py --data_dir ../eot_data/english --out predictions_english.csv
+python score.py --data_dir ../eot_data/english --pred predictions_english.csv
+
+python predict.py --data_dir ../eot_data/hindi --out predictions_hindi.csv
+python score.py --data_dir ../eot_data/hindi --pred predictions_hindi.csv</code></pre>
+<p>The required files are <code>SUMMARY.html</code>, <code>predict.py</code>, the two prediction CSVs, <code>RUNLOG.md</code> and <code>NOTES.md</code>. <code>RUNLOG.md</code> records every baseline, grouped-validation, final-fit and portability scoring run; <code>NOTES.md</code> summarizes the causal signal, remaining failures and one-day improvement plan in eight sentences. Supporting files include <code>features.py</code>, <code>eot_model.pkl</code>, <code>train_model.py</code>, <code>validate.py</code>, <code>score.py</code>, <code>README.md</code>, <code>SETUP_AND_SUBMISSION.md</code>, and <code>ERRORS_TO_REVIEW.md</code>.</p>
+
+<h2>Limitations and next work</h2>
+<p>The data set is small, and the supplied-folder 100 ms scores demonstrate fit rather than generalization. Language recognition currently uses the folder name or the conventional <code>en__</code>/<code>hi__</code> turn prefix, with a pooled fallback when neither is available. With one more day, the highest-value work would be manual inspection of grouped errors, speaker-normalized final-syllable lengthening, nested grouped tuning of the scorer's low-false-cutoff region, and a compact sequence model trained from scratch on causal log-spectrogram patches.</p>
+
+<div class="footer">Generated as part of the end-of-turn assignment package. All reported scores are reproduced in RUNLOG.md, and all inference features end at pause_start.</div>
+</main></body></html>
